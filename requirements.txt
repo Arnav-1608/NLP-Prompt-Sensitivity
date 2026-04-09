@@ -1,0 +1,10 @@
+groq
+datasets
+rouge-score
+bert-score
+reportlab
+matplotlib
+pandas
+huggingface_hub
+python-dotenv
+numpy

@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Intermediate outputs (regeneratable)
+.tmp/
+
+# Final outputs (large files)
+outputs/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/

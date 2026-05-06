@@ -187,8 +187,6 @@ A **rank stability check** reports whether the top-ranked prompt is the same acr
 | `qwen/qwen3-32b` | 1,000 | 500,000 |
 | `llama-3.1-8b-instant` | 14,400 | 500,000 |
 
-The 50-document run requires ~1,050 inference calls and ~268,800 tokens. This exceeds the 70B daily token limit (100K) but fits within the 8B limit (500K) in a single day. The LLM judge (`llama-3.1-8b-instant`) requires an additional ~1,050 calls at ~500 tokens each.
-
 ---
 
 ## Row ID Format

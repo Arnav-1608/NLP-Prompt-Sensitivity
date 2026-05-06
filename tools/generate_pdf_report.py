@@ -49,6 +49,7 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 MASTER_PATH = ".tmp/master_results.csv"
 VARIANCE_PATH = ".tmp/scores/variance_table.csv"
+RANKINGS_PATH = ".tmp/scores/prompt_rankings.csv"
 CHARTS_DIR = ".tmp/charts"
 OUTPUT_PATH = "outputs/prompt_sensitivity_report.pdf"
 
@@ -57,8 +58,8 @@ OUTPUT_PATH = "outputs/prompt_sensitivity_report.pdf"
 # ---------------------------------------------------------------------------
 LLAMA_COLOR = "#1f77b4"
 QWEN_COLOR = "#ff7f0e"
-MODEL_COLORS = {"llama3_70b": LLAMA_COLOR, "qwen3_32b": QWEN_COLOR}
-MODEL_LABELS = {"llama3_70b": "Llama 3.3-70B", "qwen3_32b": "Qwen3-32B"}
+MODEL_COLORS = {"llama3_8b": LLAMA_COLOR, "qwen3_32b": QWEN_COLOR}
+MODEL_LABELS = {"llama3_8b": "Llama 3.1-8B", "qwen3_32b": "Qwen3-32B"}
 
 PROMPT_STYLE_ORDER = [
     "zero_shot", "role_primed", "few_shot", "chain_of_thought",
@@ -76,6 +77,7 @@ STYLE_LABELS = {
 
 METRIC_COLS = [
     "rouge1", "rouge2", "rougeL", "bertscore_f1",
+    "factual_score",
     "faithfulness", "informativeness", "fluency", "conciseness",
 ]
 METRIC_LABELS = {
@@ -83,6 +85,7 @@ METRIC_LABELS = {
     "rouge2": "ROUGE-2",
     "rougeL": "ROUGE-L",
     "bertscore_f1": "BERTScore F1",
+    "factual_score": "Factual Consistency (NLI)",
     "faithfulness": "Faithfulness (Judge)",
     "informativeness": "Informativeness (Judge)",
     "fluency": "Fluency (Judge)",
@@ -576,7 +579,7 @@ def section_title(s, doc_count, date_str):
     ))
     elems.append(sp(2))
     sub_style = ParagraphStyle("Sub", parent=s["Normal"], fontSize=11, alignment=1, spaceAfter=6)
-    elems.append(Paragraph("Models: Llama 3.3-70B &amp; Qwen3-32B (via Groq Free API)", sub_style))
+    elems.append(Paragraph("Models: Llama 3.1-8B &amp; Qwen3-32B (via Groq Free API)", sub_style))
     elems.append(Paragraph("Dataset: CNN/DailyMail", sub_style))
     elems.append(Paragraph(f"Date: {date_str}", sub_style))
     elems.append(Paragraph(
@@ -610,8 +613,8 @@ def section_executive_summary(s, summary_df, models):
         findings.append(
             "Chain-of-thought outputs initially showed lower ROUGE due to reasoning preamble "
             "contamination; a post-processing strip was applied to isolate the final summary. "
-            "Factual consistency scoring via HuggingFace Inference API was unavailable (API deprecated); "
-            "the LLM judge faithfulness dimension serves as the primary hallucination proxy."
+            "Factual consistency is scored locally using cross-encoder/nli-deberta-v3-base (NLI entailment probability); "
+            "the LLM judge faithfulness dimension provides a complementary human-aligned signal."
         )
 
     for f in findings:
@@ -630,10 +633,10 @@ def section_methodology(s):
     ))
     elems.append(body(
         "CNN/DailyMail news articles were loaded via the HuggingFace <i>datasets</i> library. "
-        "Documents were stratified by length (short: under 200 words; medium: 200-400 words; "
-        "long: over 400 words) with equal sampling per tier. Documents were truncated to 600 words "
-        "to stay within Groq API token budgets. The pilot study uses 10 documents; "
-        "the full study targets 75.", s,
+        "Documents were stratified by length (short: under 400 words; medium: 400–700 words; "
+        "long: over 700 words) with approximately equal sampling per tier. "
+        "Documents were truncated to 1,200 words to stay within Groq API token budgets. "
+        "This study uses 50 documents (16 short, 18 medium, 16 long).", s,
     ))
     elems.append(sp())
 
@@ -667,7 +670,7 @@ def section_methodology(s):
     elems.append(h2("Models", s))
     elems.append(body(
         "Two instruction-tuned open-source models were evaluated via the Groq free-tier API: "
-        "<b>llama-3.3-70b-versatile</b> (Meta Llama 3.3 family, 70B parameters) and "
+        "<b>llama-3.1-8b-instant</b> (Meta Llama 3.1 family, 8B parameters) and "
         "<b>qwen/qwen3-32b</b> (Alibaba Qwen3 family, 32B parameters). "
         "Each (document, prompt style) condition was run three times (repetitions) "
         "to measure output variance independent of instruction-following quality. "
@@ -710,11 +713,16 @@ def section_quality(s, summary_df, models, charts_dir):
         elems.append(body("Data not available.", s))
         return elems
 
-    for metric in ["rouge1", "rouge2", "rougeL", "bertscore_f1"]:
+    for metric in ["rouge1", "rouge2", "rougeL", "bertscore_f1", "factual_score"]:
         if metric not in summary_df.columns:
             continue
         elems.append(h2(METRIC_LABELS.get(metric, metric), s))
         elems.append(embed_img(os.path.join(charts_dir, f"chart_{metric}.png"), s))
+        if metric == "factual_score":
+            elems.append(note(
+                "NLI entailment probability (0–1) from cross-encoder/nli-deberta-v3-base running locally. "
+                "Higher = source document more strongly entails the summary (fewer hallucinations).", s,
+            ))
         interp = _best_style_interpretation(summary_df, metric, models, s)
         if interp:
             elems.append(interp)
@@ -725,7 +733,7 @@ def section_quality(s, summary_df, models, charts_dir):
     elems.append(note(
         "All values are means across documents and repetitions, rounded to 3 decimal places.", s,
     ))
-    display_metrics = [m for m in ["rouge1", "rouge2", "rougeL", "bertscore_f1"] if m in summary_df.columns]
+    display_metrics = [m for m in ["rouge1", "rouge2", "rougeL", "bertscore_f1", "factual_score"] if m in summary_df.columns]
     header = ["Model", "Prompt Style"] + [METRIC_LABELS.get(m, m) for m in display_metrics]
     tbl_data = [header]
     for model in models:
@@ -822,7 +830,7 @@ def section_cross_model(s, summary_df, models):
             mdf = summary_df[summary_df["model"] == model]
             means[model] = mdf[metric].mean() if not mdf.empty else np.nan
 
-        llama_mean = means.get("llama3_70b", np.nan)
+        llama_mean = means.get("llama3_8b", np.nan)
         qwen_mean = means.get("qwen3_32b", np.nan)
         if pd.isna(llama_mean) or pd.isna(qwen_mean):
             continue
@@ -869,7 +877,7 @@ def section_cross_model(s, summary_df, models):
     # Written interpretation
     elems.append(sp())
     elems.append(interpret(
-        f"Overall, <b>Llama 3.3-70B wins on {llama_wins} out of {llama_wins + qwen_wins} metrics</b> "
+        f"Overall, <b>Llama 3.1-8B wins on {llama_wins} out of {llama_wins + qwen_wins} metrics</b> "
         f"and Qwen3-32B wins on {qwen_wins}. "
         "Whether this gap is consistent across prompt styles or varies significantly is visible "
         "in the per-style table above. A consistent gap suggests one model is generally more capable "
@@ -1008,10 +1016,9 @@ def section_significance(s, sig_results, models):
         "across 3 repetitions, giving 10 paired observations per comparison.", s,
     ))
     elems.append(note(
-        "Note: With n=10 documents, these tests are severely underpowered. "
-        "They are included here to validate the statistical pipeline. "
-        "Expect more meaningful p-values at 75 documents. "
-        "A result marked significant (*) at this sample size should be interpreted with caution.", s,
+        "Note: With n=50 documents, these tests have modest power. "
+        "A result marked significant (*) at this sample size should still be interpreted with caution, "
+        "as Bonferroni correction for multiple comparisons is not applied here.", s,
     ))
     elems.append(sp())
 
@@ -1084,6 +1091,150 @@ def section_rankings(s, summary_df, models):
     return elems
 
 
+SCHEME_LABELS = {
+    "equal": "Equal",
+    "faithfulness_heavy": "Faithfulness-Heavy",
+    "rouge_heavy": "ROUGE-Heavy",
+    "quality_only": "Quality Only (no variance penalty)",
+}
+SCHEME_COLORS = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2"]
+SCHEMES = list(SCHEME_LABELS.keys())
+
+
+def _composite_chart(rankings_df, model, out_path):
+    mdf = rankings_df[rankings_df["model"] == model]
+    if mdf.empty:
+        return
+
+    styles = [s for s in PROMPT_STYLE_ORDER if s in mdf["prompt_style"].values]
+    x = np.arange(len(styles))
+    w = 0.18
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for i, scheme in enumerate(SCHEMES):
+        col = f"score_{scheme}"
+        if col not in mdf.columns:
+            continue
+        vals = []
+        for st in styles:
+            row = mdf[mdf["prompt_style"] == st]
+            v = float(row[col].values[0]) if not row.empty and not pd.isna(row[col].values[0]) else 0.0
+            vals.append(v)
+        ax.bar(x + i * w, vals, w, label=SCHEME_LABELS[scheme],
+               color=SCHEME_COLORS[i], edgecolor="white", linewidth=0.5)
+
+    ax.set_xlabel("Prompt Style", fontsize=10)
+    ax.set_ylabel("Composite Score (0–1)", fontsize=10)
+    ax.set_title(
+        f"{MODEL_LABELS.get(model, model)} — Composite Scores by Weighting Scheme",
+        fontsize=11, fontweight="bold",
+    )
+    ax.set_xticks(x + w * (len(SCHEMES) - 1) / 2)
+    ax.set_xticklabels(_style_labels(styles), rotation=30, ha="right", fontsize=8)
+    ax.legend(fontsize=8)
+    ax.set_ylim(0, 1.15)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _extract_winners(mdf):
+    """Return {scheme: prompt_style} for the rank-1 prompt under each scheme."""
+    winners = {}
+    for sc in SCHEMES:
+        rank_col = f"rank_{sc}"
+        if rank_col not in mdf.columns:
+            continue
+        top_rows = mdf[mdf[rank_col] == 1]
+        winners[sc] = top_rows["prompt_style"].values[0] if not top_rows.empty else "N/A"
+    return winners
+
+
+def section_composite_rankings(s, rankings_df, models, charts_dir):
+    elems = [PageBreak(), h1("Results: Composite Prompt Ranking", s), sp()]
+    elems.append(intro(
+        "This section scores each prompt style across all five metric dimensions under four "
+        "weighting schemes. All metrics are min-max normalised within each model before weighting, "
+        "so dimensions are directly comparable. Reliability (inverse of normalised output variance) "
+        "rewards prompt styles that produce consistent outputs across repetitions. "
+        "A prompt whose rank is stable across all four schemes is a robust recommendation; "
+        "one that only wins under a specific scheme requires that scheme's priorities to justify it.", s,
+    ))
+    elems.append(sp())
+
+    if rankings_df is None:
+        elems.append(body("prompt_rankings.csv not found. Run rank_prompts.py first.", s))
+        return elems
+
+    scheme_desc = [
+        ["Scheme", "Description"],
+        ["Equal", "All six dimensions weighted equally."],
+        ["Faithfulness-Heavy", "factual_score and llm_judge_mean weighted 2x; ROUGE halved."],
+        ["ROUGE-Heavy", "rouge1 and rougeL weighted 2x; factual and judge halved."],
+        ["Quality Only", "Reliability weight set to 0 — pure quality, variance ignored."],
+    ]
+    elems.append(make_table(scheme_desc, col_widths=[1.5 * inch, 5.0 * inch]))
+    elems.append(sp())
+
+    for model in models:
+        mdf = rankings_df[rankings_df["model"] == model]
+        if mdf.empty:
+            continue
+        elems.append(h2(MODEL_LABELS.get(model, model), s))
+
+        chart_path = os.path.join(charts_dir, f"chart_composite_{model}.png")
+        elems.append(embed_img(chart_path, s))
+        elems.append(sp(0.5))
+
+        score_cols = [f"score_{sc}" for sc in SCHEMES if f"score_{sc}" in mdf.columns]
+        if score_cols:
+            header = ["Prompt Style"] + [SCHEME_LABELS[sc] for sc in SCHEMES if f"score_{sc}" in mdf.columns]
+            tbl_data = [header]
+            for style in PROMPT_STYLE_ORDER:
+                row = mdf[mdf["prompt_style"] == style]
+                if row.empty:
+                    continue
+                tbl_row = [STYLE_LABELS.get(style, style)]
+                for col in score_cols:
+                    v = row[col].values[0]
+                    tbl_row.append(fmt(v) if not pd.isna(v) else "N/A")
+                tbl_data.append(tbl_row)
+            n = len(header)
+            col_w = [1.3 * inch] + [1.2 * inch] * (n - 1)
+            elems.append(note("Composite scores (0–1, higher is better). All metrics normalised within model.", s))
+            elems.append(make_table(tbl_data, col_widths=col_w))
+            elems.append(sp())
+
+        # Rank stability check
+        winners = _extract_winners(mdf)
+        all_same = len(set(winners.values())) == 1
+        if all_same:
+            winner_name = STYLE_LABELS.get(list(winners.values())[0], list(winners.values())[0])
+            stability_text = (
+                f"<b>Rank Stability: STABLE.</b> "
+                f"<b>{winner_name}</b> ranks first under all four weighting schemes. "
+                "This is a robust recommendation — the conclusion holds regardless of which "
+                "metrics are prioritised."
+            )
+        else:
+            winner_strs = [
+                f"{SCHEME_LABELS[sc]}: {STYLE_LABELS.get(w, w)}"
+                for sc, w in winners.items()
+            ]
+            stability_text = (
+                "<b>Rank Stability: VARIES.</b> The top-ranked prompt changes depending on "
+                "the weighting scheme: " + "; ".join(winner_strs) + ". "
+                "Practitioners should select the scheme that best matches their deployment "
+                "priorities (e.g., Faithfulness-Heavy for high-stakes summarisation)."
+            )
+        elems.append(interpret(stability_text, s))
+        elems.append(sp())
+
+    return elems
+
+
 def section_heatmap(s, master_df, models, charts_dir):
     elems = [PageBreak(), h1("Per-Document Breakdown", s), sp()]
     elems.append(intro(
@@ -1107,7 +1258,7 @@ def section_heatmap(s, master_df, models, charts_dir):
     return elems
 
 
-def section_discussion(s, summary_df, models):
+def section_discussion(s, summary_df, models, rankings_df=None):
     elems = [PageBreak(), h1("Discussion", s), sp()]
 
     # Para 1: Main findings
@@ -1134,11 +1285,11 @@ def section_discussion(s, summary_df, models):
     # Para 2: Cross-model generalizability
     elems.append(body(
         "<b>Cross-Model Generalizability.</b> "
-        "Llama 3.3-70B consistently outperformed Qwen3-32B on automatic overlap metrics (ROUGE, BERTScore) "
-        "across most prompt styles in this pilot. However, this advantage may reflect dataset-specific "
-        "factors rather than general capability: CNN/DailyMail is heavily represented in Llama pre-training data. "
-        "Whether the winning prompt style generalizes across both model families should be assessed "
-        "at the full 75-document scale before drawing practitioner conclusions.", s,
+        "Llama 3.1-8B and Qwen3-32B represent different capability tiers (8B vs 32B parameters), "
+        "so cross-model differences in this study reflect both prompt sensitivity and model size effects. "
+        "Whether prompt style rankings are consistent across model scales is itself a key finding. "
+        "CNN/DailyMail is heavily represented in public pre-training corpora, so absolute ROUGE scores "
+        "may overestimate real-world quality for both models.", s,
     ))
     elems.append(sp())
 
@@ -1155,15 +1306,51 @@ def section_discussion(s, summary_df, models):
     ))
     elems.append(sp())
 
-    # Para 4: Practical recommendations
+    # Para 4: Composite ranking and metric-weighting sensitivity
+    if rankings_df is not None:
+        stability_lines = []
+        for model in models:
+            mdf = rankings_df[rankings_df["model"] == model]
+            if mdf.empty:
+                continue
+            winners = _extract_winners(mdf)
+            all_same = len(set(winners.values())) == 1
+            label = MODEL_LABELS.get(model, model)
+            if all_same:
+                winner_name = STYLE_LABELS.get(list(winners.values())[0], list(winners.values())[0])
+                stability_lines.append(
+                    f"{label}: <b>{winner_name}</b> is the top-ranked prompt under all four schemes (stable)."
+                )
+            else:
+                stability_lines.append(
+                    f"{label}: the top-ranked prompt varies across weighting schemes, indicating "
+                    "that the 'best' prompt depends on whether faithfulness, ROUGE, or reliability is prioritised."
+                )
+
+        elems.append(body(
+            "<b>Composite Ranking and Metric-Weighting Sensitivity.</b> "
+            "The weighted composite ranking (Section 10) tests whether the conclusion about the "
+            "best prompt style holds up when different metrics are prioritised. " +
+            " ".join(stability_lines) +
+            " When the top-ranked prompt is stable, practitioners can apply the recommendation "
+            "confidently regardless of their metric preferences. When it varies, the choice of "
+            "prompt should be driven by deployment context — for example, preferring a "
+            "faithfulness-heavy scheme for high-stakes summarisation (medical, legal) versus "
+            "a ROUGE-heavy scheme when matching reference coverage is the primary goal.", s,
+        ))
+        elems.append(sp())
+
+    # Para 5: Practical recommendations
     elems.append(body(
         "<b>Practical Recommendations.</b> "
-        "Based on the pilot data, practitioners who want to use Llama 3.3-70B or Qwen3-32B for "
-        "news summarization today should: (1) prefer role-primed or perturbation-style prompts, "
-        "which tend to score well on both quality and consistency; "
+        "Based on this study's data, practitioners who want to use Llama 3.1-8B or Qwen3-32B for "
+        "news summarization today should: (1) prefer the top-ranked prompt from the composite "
+        "ranking under the equal-weight scheme as a starting point; "
         "(2) avoid chain-of-thought unless downstream systems are built to strip reasoning preambles; "
-        "(3) run at least 3 repetitions when quality matters, to detect high-variance conditions. "
-        "These recommendations should be re-evaluated at the full 75-document study scale.", s,
+        "(3) run at least 3 repetitions when quality matters, to detect high-variance conditions; "
+        "(4) if the composite ranking is unstable, consult the scheme that best matches deployment "
+        "priorities before committing to a single prompt style. "
+        "These recommendations should be re-evaluated at the full 50-document study scale.", s,
     ))
     return elems
 
@@ -1174,16 +1361,18 @@ def section_limitations(s):
         "This section documents known constraints on the study's scope and reliability.", s,
     ))
     limitations = [
-        "<b>Sample size:</b> Pilot study uses 10 documents. Statistical significance tests are "
-        "severely underpowered at n=10. All findings are preliminary.",
+        "<b>Sample size:</b> This study uses 50 documents. Statistical significance tests at n=50 "
+        "have modest power; Bonferroni correction for multiple comparisons is not applied. "
+        "Findings are preliminary and should be replicated at larger scale.",
 
         "<b>Dataset scope:</b> CNN/DailyMail is a single-domain English news benchmark. "
         "Findings may not transfer to other domains (biomedical, legal, creative) or languages.",
 
-        "<b>Factual consistency scoring unavailable:</b> Both MiniCheck-Flan-T5-Large and "
-        "cross-encoder/nli-deberta-v3-base returned HTTP 410 Gone from the HuggingFace free "
-        "Inference API. The LLM judge faithfulness dimension is used as a proxy. "
-        "Local SummaC or NLI scoring is recommended for the full study.",
+        "<b>Factual consistency scoring:</b> Factual consistency is scored using "
+        "cross-encoder/nli-deberta-v3-base running locally via sentence-transformers. "
+        "The NLI entailment probability is used as the hallucination proxy. "
+        "This model was trained on MNLI/SNLI and may not generalise perfectly to news summarisation; "
+        "a domain-adapted scorer (e.g. SummaC) is recommended for the full study.",
 
         "<b>API non-determinism:</b> The Groq API may apply non-deterministic sampling even with "
         "default settings. Measured output variance reflects both model stochasticity and API-level "
@@ -1267,6 +1456,10 @@ def main():
     if os.path.exists(VARIANCE_PATH):
         variance_df = pd.read_csv(VARIANCE_PATH)
 
+    rankings_df = None
+    if os.path.exists(RANKINGS_PATH):
+        rankings_df = pd.read_csv(RANKINGS_PATH)
+
     doc_count = master_df["doc_id"].nunique() if "doc_id" in master_df.columns else 0
     models = sorted(master_df["model"].unique()) if "model" in master_df.columns else []
 
@@ -1304,6 +1497,11 @@ def main():
         _heatmap_chart(master_df, model, "rouge1",
                        os.path.join(CHARTS_DIR, f"chart_heatmap_{model}.png"))
 
+    if rankings_df is not None:
+        for model in models:
+            _composite_chart(rankings_df, model,
+                             os.path.join(CHARTS_DIR, f"chart_composite_{model}.png"))
+
     print("Charts saved.")
 
     # -----------------------------------------------------------------------
@@ -1329,8 +1527,9 @@ def main():
     story += section_perturbation(s, summary_df, master_df, models, CHARTS_DIR)
     story += section_significance(s, sig_results, models)
     story += section_rankings(s, summary_df, models)
+    story += section_composite_rankings(s, rankings_df, models, CHARTS_DIR)
     story += section_heatmap(s, master_df, models, CHARTS_DIR)
-    story += section_discussion(s, summary_df, models)
+    story += section_discussion(s, summary_df, models, rankings_df)
     story += section_limitations(s)
     story += section_appendix(s, master_df)
 

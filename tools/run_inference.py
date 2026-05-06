@@ -12,14 +12,14 @@ PROMPTS_PATH = ".tmp/all_prompts.jsonl"
 OUTPUT_PATH = ".tmp/raw_summaries.jsonl"
 
 MODELS = {
-    "llama3_70b": "llama-3.3-70b-versatile",
     "qwen3_32b": "qwen/qwen3-32b",
+    "llama3_8b": "llama-3.1-8b-instant",
 }
 
 MAX_TOKENS = 256
 RETRY_COUNT = 3
 RETRY_WAIT = 60  # seconds to wait on rate limit
-COURTESY_SLEEP = 1  # seconds between all calls
+COURTESY_SLEEP = 13  # seconds between calls to stay under 6K TPM
 
 
 def call_groq(client, model_id, prompt_text, retries=RETRY_COUNT, wait=RETRY_WAIT):

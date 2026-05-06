@@ -29,7 +29,9 @@ STRICT_SYSTEM_PROMPT = (
     "Score each dimension 1-5. No other text."
 )
 
-COURTESY_SLEEP = 0.3
+COURTESY_SLEEP = 5  # ~500 tokens/call × 12 calls/min = 6K TPM limit
+RETRY_COUNT = 3
+RETRY_WAIT = 60  # seconds on rate limit
 
 
 def make_user_prompt(source_document, generated_summary, strict=False):
@@ -59,15 +61,27 @@ def parse_judge_response(text):
 
 
 def call_judge(client, source_document, generated_summary, system_prompt):
-    response = client.chat.completions.create(
-        model=JUDGE_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": make_user_prompt(source_document, generated_summary)},
-        ],
-        max_tokens=128,
-    )
-    return response.choices[0].message.content
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": make_user_prompt(source_document, generated_summary)},
+    ]
+    for attempt in range(RETRY_COUNT):
+        try:
+            response = client.chat.completions.create(
+                model=JUDGE_MODEL,
+                messages=messages,
+                max_tokens=128,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            err = str(e).lower()
+            if "rate_limit" in err or "429" in err:
+                print(f"  Rate limited (attempt {attempt + 1}/{RETRY_COUNT}) — waiting {RETRY_WAIT}s...",
+                      file=sys.stderr)
+                time.sleep(RETRY_WAIT)
+            else:
+                raise
+    raise RuntimeError(f"Max retries exceeded for judge model {JUDGE_MODEL}")
 
 
 def score_row(client, record):
@@ -114,44 +128,59 @@ def main():
         for line in f:
             records.append(json.loads(line))
 
-    print(f"Scoring {len(records)} rows with LLM judge ({JUDGE_MODEL})...")
+    # Resume: skip already-scored rows
+    completed_ids = set()
+    if os.path.exists(OUTPUT_PATH):
+        with open(OUTPUT_PATH, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("faithfulness") not in (None, "", "None"):
+                    completed_ids.add(row["row_id"])
+        if completed_ids:
+            print(f"Resuming — {len(completed_ids)} rows already scored, skipping them.")
 
-    rows = []
+    pending = [r for r in records if r["row_id"] not in completed_ids]
+    print(f"Scoring {len(pending)}/{len(records)} rows with LLM judge ({JUDGE_MODEL})...")
+
     parse_failures = 0
+    fieldnames = ["row_id", "faithfulness", "informativeness", "fluency", "conciseness"]
 
-    for i, record in enumerate(records):
-        scores = score_row(client, record)
+    # Open in append mode so completed rows are preserved
+    write_header = not os.path.exists(OUTPUT_PATH) or os.path.getsize(OUTPUT_PATH) == 0
+    with open(OUTPUT_PATH, "a", newline="") as out_f:
+        writer = csv.DictWriter(out_f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
 
-        if scores:
-            rows.append({
-                "row_id": record["row_id"],
-                "faithfulness": scores.get("faithfulness"),
-                "informativeness": scores.get("informativeness"),
-                "fluency": scores.get("fluency"),
-                "conciseness": scores.get("conciseness"),
-            })
-        else:
-            parse_failures += 1
-            rows.append({
-                "row_id": record["row_id"],
-                "faithfulness": None,
-                "informativeness": None,
-                "fluency": None,
-                "conciseness": None,
-            })
+        for i, record in enumerate(pending):
+            scores = score_row(client, record)
 
-        if (i + 1) % 10 == 0:
-            print(f"  Progress: {i + 1}/{len(records)} ({parse_failures} parse failures so far)")
+            if scores:
+                row = {
+                    "row_id": record["row_id"],
+                    "faithfulness": scores.get("faithfulness"),
+                    "informativeness": scores.get("informativeness"),
+                    "fluency": scores.get("fluency"),
+                    "conciseness": scores.get("conciseness"),
+                }
+            else:
+                parse_failures += 1
+                row = {
+                    "row_id": record["row_id"],
+                    "faithfulness": None,
+                    "informativeness": None,
+                    "fluency": None,
+                    "conciseness": None,
+                }
+            writer.writerow(row)
+            out_f.flush()
 
-    with open(OUTPUT_PATH, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f, fieldnames=["row_id", "faithfulness", "informativeness", "fluency", "conciseness"]
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+            if (i + 1) % 10 == 0:
+                print(f"  Progress: {i + 1}/{len(pending)} ({parse_failures} parse failures so far)")
 
-    print(f"\nDone. {len(rows)} rows scored, {parse_failures} parse failures.")
-    print(f"Output: {OUTPUT_PATH}")
+    total_scored = len(completed_ids) + len(pending)
+    print(f"\nDone. {len(pending)} new rows scored, {parse_failures} parse failures.")
+    print(f"Total rows in file: {total_scored}. Output: {OUTPUT_PATH}")
     if parse_failures > len(records) * 0.05:
         print(
             f"WARNING: {parse_failures}/{len(records)} rows failed JSON parsing "

@@ -2,53 +2,21 @@ import os
 import json
 import csv
 import sys
-import time
 
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
+from sentence_transformers.cross_encoder import CrossEncoder
 
 SUMMARIES_PATH = ".tmp/raw_summaries.jsonl"
 OUTPUT_PATH = ".tmp/scores/factual_scores.csv"
-
-API_URL = "https://api-inference.huggingface.co/models/cross-encoder/nli-deberta-v3-base"
-TIMEOUT = 120
-COURTESY_SLEEP = 0.5
-COLD_START_WAIT = 30
-
-
-def query_minicheck(document, summary, headers):
-    # NLI: premise = source document, hypothesis = generated summary
-    payload = {
-        "inputs": {
-            "premise": document,
-            "hypothesis": summary,
-        }
-    }
-    for attempt in range(3):
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=TIMEOUT)
-        if response.status_code == 503:
-            body = response.json()
-            if "loading" in str(body).lower():
-                print(f"  Model loading — waiting {COLD_START_WAIT}s...", file=sys.stderr)
-                time.sleep(COLD_START_WAIT)
-                continue
-        response.raise_for_status()
-        return response.json()
-    raise RuntimeError("NLI API failed after 3 attempts (model loading)")
+MODEL_NAME = "cross-encoder/nli-deberta-v3-base"
+# id2label for this model: 0=contradiction, 1=entailment, 2=neutral
+ENTAILMENT_IDX = 1
+BATCH_SIZE = 64
 
 
-def extract_factual_score(api_response):
-    # HF NLI API returns [{"label": "ENTAILMENT", "score": ...}, ...]
-    if isinstance(api_response, list) and len(api_response) > 0:
-        inner = api_response[0] if isinstance(api_response[0], list) else api_response
-        for item in inner:
-            if item.get("label", "").upper() == "ENTAILMENT":
-                return item["score"]
-        # Fallback: return score of whichever label has highest score
-        return max(inner, key=lambda x: x["score"])["score"]
-    return None
+def load_model():
+    print(f"Loading {MODEL_NAME} (downloads ~700 MB on first run, cached after)...")
+    # Force CPU: long documents exceed GPU memory budget on MPS (Apple Silicon).
+    return CrossEncoder(MODEL_NAME, max_length=512, device="cpu")
 
 
 def main():
@@ -57,12 +25,6 @@ def main():
             f"{SUMMARIES_PATH} not found. Run run_inference.py first."
         )
 
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise EnvironmentError("HF_TOKEN not set. Add it to your .env file.")
-
-    headers = {"Authorization": f"Bearer {hf_token}"}
-
     os.makedirs(".tmp/scores", exist_ok=True)
 
     records = []
@@ -70,31 +32,29 @@ def main():
         for line in f:
             records.append(json.loads(line))
 
-    print(f"Scoring {len(records)} rows for factual consistency via MiniCheck...")
-    print("Note: First call may take ~30s due to API cold start.")
+    model = load_model()
+    print(f"Scoring {len(records)} rows for factual consistency (local NLI)...")
 
-    rows = []
-    for i, record in enumerate(records):
+    pairs = [[r["source_document"], r["generated_summary"]] for r in records]
+    scores_out = [None] * len(records)
+
+    for start in range(0, len(pairs), BATCH_SIZE):
+        batch = pairs[start : start + BATCH_SIZE]
         try:
-            result = query_minicheck(
-                document=record["source_document"],
-                summary=record["generated_summary"],
-                headers=headers,
-            )
-            score = extract_factual_score(result)
+            batch_scores = model.predict(batch, apply_softmax=True)
+            for j, s in enumerate(batch_scores):
+                scores_out[start + j] = float(s[ENTAILMENT_IDX])
         except Exception as e:
-            print(f"  ERROR on {record['row_id']}: {e}", file=sys.stderr)
-            score = None
+            print(f"  ERROR on batch {start}–{start + len(batch) - 1}: {e}", file=sys.stderr)
+        print(f"  Progress: {min(start + BATCH_SIZE, len(records))}/{len(records)}")
 
-        rows.append({
-            "row_id": record["row_id"],
-            "factual_score": round(score, 6) if score is not None else "",
-        })
-
-        time.sleep(COURTESY_SLEEP)
-
-        if (i + 1) % 10 == 0:
-            print(f"  Progress: {i + 1}/{len(records)}")
+    rows = [
+        {
+            "row_id": r["row_id"],
+            "factual_score": round(scores_out[i], 6) if scores_out[i] is not None else "",
+        }
+        for i, r in enumerate(records)
+    ]
 
     with open(OUTPUT_PATH, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["row_id", "factual_score"])

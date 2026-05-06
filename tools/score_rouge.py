@@ -41,7 +41,7 @@ def main():
     print(f"Scored {len(rows)} rows. Output: {OUTPUT_PATH}")
     if rows:
         avg_r1 = sum(r["rouge1"] for r in rows) / len(rows)
-        print(f"Mean ROUGE-1: {avg_r1:.4f} (expected range 0.2–0.6 for XSum)")
+        print(f"Mean ROUGE-1: {avg_r1:.4f} (expected range 0.2–0.6 for CNN/DailyMail)")
 
 
 if __name__ == "__main__":
